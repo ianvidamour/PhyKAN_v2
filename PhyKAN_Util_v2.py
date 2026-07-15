@@ -21,9 +21,9 @@ class PhyKAN_v2(nn.Module):
         self.filter_beta = filter_beta
         self.encode_alpha = encode_alpha
         self.encode_beta = encode_beta
+        
         # Properly register parameters using nn.ParameterList
         self.filter_params = nn.ParameterList()
-        self.edge_mask = []
         for i in range(self.Nlayers):
             low_params = torch.linspace(-1, 1, filters_per_unit).unsqueeze(0).unsqueeze(0).unsqueeze(-1)
             layer_params = torch.tile(low_params, (KANshape[i], KANshape[i+1], 1, 2))
@@ -34,22 +34,26 @@ class PhyKAN_v2(nn.Module):
             factor = np.sqrt(6 / (filters_per_unit * (KANshape[i] + KANshape[i+1])))
             gains = (2 * torch.rand((KANshape[i], KANshape[i+1], filters_per_unit, 1)) - 1) * factor
             params = torch.cat((gains, layer_params), dim=3)
-            # Wrap in nn.Parameter so PyTorch tracks gradeints
+            
+            # Wrap in nn.Parameter so PyTorch tracks gradients
             self.filter_params.append(nn.Parameter(params))
             layer_mask = torch.ones((KANshape[i], KANshape[i+1]))
-            self.edge_mask.append(layer_mask)
+            self.register_buffer(f'edge_mask_{i}', layer_mask)
+            
         # Initialise optimisers
         self.filter_optim = torch.optim.Adam(params=self.filter_params, lr=lr)
-        self.sched1 = torch.optim.lr_scheduler.ExponentialLR(self.filter_optim, 0.99)
+        self.sched1 = torch.optim.lr_scheduler.ExponentialLR(self.filter_optim, lr_decay)
         self.lossfn = nn.MSELoss()
         self.sigmoid_s = sigmoid_s
-        self.low_pass_lookup = torch.tensor(low_pass_lookup)
-        self.high_pass_lookup = torch.tensor(high_pass_lookup)
+        
+        # Register lookups as buffers to ensure auto-GPU migration
+        self.register_buffer('low_pass_lookup', torch.tensor(low_pass_lookup))
+        self.register_buffer('high_pass_lookup', torch.tensor(high_pass_lookup))
     
     def sig(self, x):
-        return torch.Sigmoid(x/self.sigmoid_s)
+        # Fix: Changed to lowercase 'sigmoid' to avoid class instantiation error
+        return torch.sigmoid(x/self.sigmoid_s)
         
-    # Redefined for torch & assuming trainable parameters
     def band_pass_discrete(self, Xin, params, mask):
         # Bound parameters
         bounded_params = self.sig(params)
@@ -64,47 +68,45 @@ class PhyKAN_v2(nn.Module):
         # Set cutoff frequencies from parameters
         fc_low = 10**(self.filter_alpha + self.filter_beta * bounded_params[:, :, :, 1])
         fc_high = 10**(self.filter_alpha + self.filter_beta * bounded_params[:, :, :, 2])
-        # Initialise discretised outputs
-        discretised_fc_low = torch.zeros_like(fc_low)
-        discretised_fc_high = torch.zeros_like(fc_high)
-        # Extend tensors to same dimensions as parameters to ease selection
-        expanded_low_lookup = torch.tile(self.low_pass_lookup, (fc_low.shape+(1,)))
-        expanded_low_values = torch.tile(fc_low.unsqueeze(-1), (1, 1, 1, self.low_pass_lookup.shape[0]))
-        expanded_high_lookup = torch.tile(self.high_pass_lookup, (fc_high.shape+(1,)))
-        expanded_high_values = torch.tile(fc_high.unsqueeze(-1), (1, 1, 1, self.high_pass_lookup.shape[0]))
-        # Find difference between values
-        difference_low = (expanded_low_lookup - expanded_low_values).abs()
-        difference_high = (expanded_high_lookup - expanded_high_values).abs()
+        
+        # Find difference between values via broadcasting
+        difference_low = (self.low_pass_lookup - fc_low.unsqueeze(-1)).abs()
+        difference_high = (self.high_pass_lookup - fc_high.unsqueeze(-1)).abs()
+        
         # Find minima along varied axis
         mindiff_low = torch.argmin(difference_low, dim=-1)
         mindiff_high = torch.argmin(difference_high, dim=-1)
+        
         # Select discretised samples
-        discretised_fc_low[:,:,:] = self.low_pass_lookup[mindiff_low[:,:,:]]
-        discretised_fc_high[:,:,:] = self.high_pass_lookup[mindiff_high[:,:,:]]
+        discretised_fc_low = self.low_pass_lookup[mindiff_low]
+        discretised_fc_high = self.high_pass_lookup[mindiff_high]
+        
         # Passthrough discretisation to enable backprop (straight-through estimator)
         passed_fc_low = fc_low + discretised_fc_low.detach() - fc_low.detach()
         passed_fc_high = fc_high + discretised_fc_high.detach() - fc_high.detach()
-        # Refactored forward pass to avoid complex numbers
-        x = freq / discretised_fc_low
-        y = freq / discretised_fc_high
+        
+        # Fix: Use passed_fc_* variables so that backward gradients can bypass detach()
+        x = freq / passed_fc_low
+        y = freq / passed_fc_high
+        
         # Use torch.hypot to safely compute sqrt(1 + x^2) without precision collapse
         ones = torch.ones_like(x)
         mag_high = x / torch.hypot(ones, x)
         mag_low = 1.0 / torch.hypot(ones, y)
+        
         # Combine responses
-        Hout = discretised_gain * (mag_high * mag_low)
+        Hout = discretised_gain * (mag_high * mag_low) * mask.unsqueeze(0).unsqueeze(-1)
         # Return sum over sub-filters for edge activations
         activations = Hout.sum(dim=-1)
         # Return sum over incoming connections for node inputs
         node_inputs = activations.sum(dim=1)
         return activations, node_inputs
 
-    
     def band_pass_continuous(self, Xin, params, mask):
         # Bound parameters
         bounded_params= self.sig(params)
         # Encode inputs to frequency space
-        prefreq = 10**(3.65+1.5*Xin).unsqueeze(-1).unsqueeze(-1)
+        prefreq = torch.pow(10.0, self.encode_alpha + self.encode_beta * Xin).unsqueeze(-1).unsqueeze(-1)
         freq = (4e6/np.pi)*torch.arctan((np.pi*prefreq)/4e6)
         # Map to filter parameters
         gain = 3*(bounded_params[:,:,:, 0].unsqueeze(0)-0.5)
@@ -118,38 +120,44 @@ class PhyKAN_v2(nn.Module):
         mag_high = x / torch.hypot(ones, x)
         mag_low = 1.0 / torch.hypot(ones, y)
         # Combine responses
-        Hout = gain * (mag_high * mag_low)
+        Hout = gain * (mag_high * mag_low) * mask.unsqueeze(0).unsqueeze(-1)
         # Return sum over sub-filters for edge activations
         activations = Hout.sum(dim=-1)
         # Return sum over incoming connections for node inputs
-        node_inputs = activations.sum(dim=1)
+        node_inputs = activations.sum(dim=1) 
         return activations, node_inputs
 
-    
     def forward(self, Xin, discrete=False, return_edges=False):
-        batch_size = len(Xin)
-        # Initialise inputs to and outputs from each layer
-        inputs = []
+        # Initialize empty lists to store layer outputs dynamically
         edge_activations = []
         node_activations = []
-        for i in range(self.Nlayers):
-            inputs.append(torch.zeros((batch_size, self.KANshape[i])))
-            edge_activations.append(torch.zeros((batch_size, self.KANshape[i], self.KANshape[i+1])))
-            node_activations.append(torch.zeros((batch_size, self.KANshape[i+1])))
-        inputs[0][:,:] = self.sig((Xin))
-        if discrete==True:
-            # Pass through model
-            for layer in range(self.Nlayers):
-                edge_activations[layer][:, :, :], node_activations[layer][:, :] = self.band_pass_discrete(inputs[layer], self.filter_params[layer], self.edge_mask[layer])
-                if layer < self.Nlayers-1:
-                    inputs[layer+1][:, :] = self.sig(node_activations[layer][:, :])
-        else:
-            # Pass through model
-            for layer in range(self.Nlayers):
-                edge_activations[layer][:, :, :], node_activations[layer][:, :] = self.band_pass_continuous(inputs[layer], self.filter_params[layer], self.edge_mask[layer])
-                if layer < self.Nlayers-1:
-                    inputs[layer+1][:, :] = self.sig(node_activations[layer][:, :])
-        if return_edges==False:
+        # The input to the first layer is the sigmoid of Xin
+        current_input = self.sig(Xin)
+        # Pass through the model layer by layer
+        for layer in range(self.Nlayers):
+            # Load the current edge mask for the layer
+            current_mask = getattr(self, f'edge_mask_{layer}')
+            # Process the current layer based on discrete or continuous flag
+            if discrete:
+                edges, nodes = self.band_pass_discrete(
+                    current_input, 
+                    self.filter_params[layer], 
+                    current_mask
+                )
+            else:
+                edges, nodes = self.band_pass_continuous(
+                    current_input, 
+                    self.filter_params[layer], 
+                    current_mask
+                )
+            # Store the resulting tensors
+            edge_activations.append(edges)
+            node_activations.append(nodes)
+            # Prepare the input for the next layer (if this isn't the final layer)
+            if layer < self.Nlayers - 1:
+                current_input = self.sig(nodes)
+        # Return the requested activations
+        if not return_edges:
             return node_activations
         else:
             return node_activations, edge_activations
@@ -157,38 +165,37 @@ class PhyKAN_v2(nn.Module):
     def train(self, Xin, Yin, penalty=True, stability_penalty=True, lamda=1e-4, stablam=1e-5, discrete=False):
         # Reset optimisers
         self.filter_optim.zero_grad()
-        self.threshold_optim.zero_grad()
         # Pass through Model
         node_activations, edge_activations = self.forward(Xin, discrete=discrete, return_edges=True)
         pred = node_activations[-1]
         # Calculate loss
         loss_np = self.lossfn(pred, Yin)
+        
         # Add penalty terms
-        if penalty==True:
+        if penalty:
             penalty_loss = lamda * self.penalty(edge_activations)
             loss = loss_np + penalty_loss
         else:
             loss = loss_np
-        stability_loss = 0
-        if stability_penalty==True:
-            loss.backward(retain_graph=True)
-            if stability_penalty == True:
-                for layer in self.filter_params:
-                    params = torch.zeros_like(layer)
-                    params[:,:,:,0] = 3*(layer[:,:,:,0]-0.5)
-                    params[:,:,:,1:] = 10**(3.65+1.9*layer[:,:,:,1:])
-                    gradients = layer.grad.abs().sum()
-                    stability_loss = stability_loss+gradients*stablam
-                loss = loss + stability_loss
-            # Second backward pass to correctly include stability penalty
+            penalty_loss = torch.tensor(0.0)
+            
+        stability_loss = torch.tensor(0.0)
+        if stability_penalty:
+            # True Gradient Penalty (Double Backprop via autograd.grad)
+            grads = torch.autograd.grad(loss, self.filter_params, create_graph=True)
+            for g in grads:
+                stability_loss = stability_loss + g.abs().sum() * stablam
+            
+            # Combine loss and perform second backward pass with computed gradient penalties
+            loss = loss + stability_loss
             loss.backward()
         else:
-            # Backward pass
+            # Single backward pass
             loss.backward()
+            
         # Update parameters
         self.filter_optim.step()
-        self.threshold_optim.step()
-        
+
         return loss_np.item(), penalty_loss.item(), stability_loss.item()
 
     # Refactored for improved speed
@@ -198,8 +205,9 @@ class PhyKAN_v2(nn.Module):
         penalty = 0
         # Loop over layers
         for layer in range(self.Nlayers-1):
+            layer_acts = activations[layer]
             # Precompute absolute activations as repeated operation
-            abs_acts = layer.abs()
+            abs_acts = layer_acts.abs()
             # Calculate l1 penalties 
             l1_layer = (1/n) * abs_acts.sum()
             # Find q
@@ -208,18 +216,26 @@ class PhyKAN_v2(nn.Module):
             # Combine terms
             penalty = penalty + l1_layer + entropy_layer
         return penalty
-        
 
-    def prune_edges(self, threshold = 0.05):
+    def prune_edges(self, threshold=0.05):
         xs = torch.linspace(0, 1, 1000)
         for layer in range(self.Nlayers-1):
+            # Fetch dynamic edge mask
+            current_mask = getattr(self, f'edge_mask_{layer}')
+            # Expand xs to (1000, KANshape[layer]) to match expected forward batch shape
+            xs_expanded = xs.unsqueeze(-1).expand(-1, self.KANshape[layer])
+            # Continuous evaluation of bandpass filters over the layer
+            layer_nodes, layer_edges = self.band_pass_continuous(
+                xs_expanded, 
+                self.filter_params[layer], 
+                current_mask
+            )
+            # Loop over all edges in the layer, pruning if activation is below threshold
             for pre in range(self.KANshape[layer]):
                 for post in range(self.KANshape[layer+1]):
-                    if self.edge_mask[layer][pre, post] == 0:
+                    edges = layer_edges[:, pre, post] 
+                    if current_mask[pre, post] == 0:
                         continue
-                    edges = self.band_pass_edges(xs, self.filter_params[layer][pre, post])
                     if torch.abs(edges).mean() < threshold:
-                        self.edge_mask[layer][pre, post] = 0
-                        print('Pruning edge, layer '+str(layer)+' '+str(pre)+' '+str(post))
-            
-                
+                        current_mask[pre, post] = 0
+                        print(f'Pruning edge, layer {layer} {pre} {post}')
