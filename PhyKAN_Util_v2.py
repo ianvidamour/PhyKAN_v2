@@ -47,8 +47,8 @@ class PhyKAN_v2(nn.Module):
         self.sigmoid_s = sigmoid_s
         
         # Register lookups as buffers to ensure auto-GPU migration
-        self.register_buffer('low_pass_lookup', torch.tensor(low_pass_lookup))
-        self.register_buffer('high_pass_lookup', torch.tensor(high_pass_lookup))
+        self.register_buffer('low_pass_lookup', torch.tensor(low_pass_lookup, dtype=torch.float32))
+        self.register_buffer('high_pass_lookup', torch.tensor(high_pass_lookup, dtype=torch.float32))
     
     def sig(self, x):
         # Fix: Changed to lowercase 'sigmoid' to avoid class instantiation error
