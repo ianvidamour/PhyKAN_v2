@@ -211,7 +211,7 @@ class PhyKAN_v2(nn.Module):
             # Calculate l1 penalties 
             l1_layer = (1/n) * abs_acts.sum()
             # Find q
-            q_ih = (1/n) * (abs_acts/abs_acts.sum(dim=(1,2)).unsqueeze(-1).unsqueeze(-1)).sum(dim=0)
+            q_ih = -1 * (1/n) * (abs_acts/abs_acts.sum(dim=(1,2)).unsqueeze(-1).unsqueeze(-1)).sum(dim=0)
             entropy_layer = (q_ih * torch.log(q_ih + 1e-9)).sum()
             # Combine terms
             penalty = penalty + l1_layer + entropy_layer
