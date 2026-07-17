@@ -22,8 +22,8 @@ import gymnasium_robotics
 
 device='cuda'
 # Sizes of actions/states, and hidden nodes
-Nactions = 1
-Nstates = 3
+Nactions = 20
+Nstates = 63
 
 # Instantiate replay buffer
 replay_buffer = EfficientReplayBuffer(Nstates, Nactions)
