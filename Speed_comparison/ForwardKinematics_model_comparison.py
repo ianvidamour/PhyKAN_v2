@@ -42,11 +42,11 @@ np.random.shuffle(idxs)
 shuffled_X = Xin[idxs]
 shuffled_Y = Yin[idxs]
 
-x_train, x_val = np.split(shuffled_X, [3000])
+x_train, x_val = np.split(shuffled_X, [12000])
 x_train = torch.from_numpy(x_train).float().to(device)
 x_val = torch.from_numpy(x_val).float().to(device)
 
-y_train, y_val = np.split(shuffled_Y, [3000])
+y_train, y_val = np.split(shuffled_Y, [12000])
 y_train = torch.from_numpy(y_train).float().to(device)
 y_val = torch.from_numpy(y_val).float().to(device)
 
