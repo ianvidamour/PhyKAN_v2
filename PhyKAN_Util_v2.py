@@ -204,7 +204,7 @@ class PhyKAN_v2(nn.Module):
         # Set up variable
         penalty = 0
         # Loop over layers
-        for layer in range(self.Nlayers-1):
+        for layer in range(self.Nlayers):
             layer_acts = activations[layer]
             # Precompute absolute activations as repeated operation
             abs_acts = layer_acts.abs()
