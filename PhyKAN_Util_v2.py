@@ -201,20 +201,27 @@ class PhyKAN_v2(nn.Module):
     # Refactored for improved speed
     def penalty(self, activations):
         n = len(activations[0])
-        # Set up variable
-        penalty = 0
-        # Loop over layers
-        for layer in range(self.Nlayers):
+        penalty = 0.0
+        eps = 1e-8
+
+        for layer in range(self.Nlayers - 1):
             layer_acts = activations[layer]
-            # Precompute absolute activations as repeated operation
             abs_acts = layer_acts.abs()
-            # Calculate l1 penalties 
-            l1_layer = (1/n) * abs_acts.sum()
-            # Find q
-            q_ih = -1 * (1/n) * (abs_acts/abs_acts.sum(dim=(1,2)).unsqueeze(-1).unsqueeze(-1)).sum(dim=0)
-            entropy_layer = (q_ih * torch.log(q_ih + 1e-9)).sum()
-            # Combine terms
+
+            # L1 sparsity term with a tiny stabilizing offset.
+            l1_layer = (1.0 / n) * abs_acts.sum() + eps
+
+            # Normalize activations safely across the incoming edges.
+            denom = abs_acts.sum(dim=(1, 2), keepdim=True)
+            denom = torch.clamp(denom, min=eps)
+            probs = abs_acts / denom
+
+            # Compute a positive distribution over incoming edges for entropy regularization.
+            q_ih = (1.0 / n) * probs.sum(dim=0)
+            entropy_layer = -(q_ih * torch.log(torch.clamp(q_ih, min=eps))).sum()
+
             penalty = penalty + l1_layer + entropy_layer
+
         return penalty
 
     def prune_edges(self, threshold=0.05):
