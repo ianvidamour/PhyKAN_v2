@@ -134,7 +134,10 @@ for episode in tqdm.tqdm(range(Nepisodes)):
         print('Train Reward: ' + str(episode_reward))
         print('Eval Reward (Deterministic): ' + str(eval_reward))
 
-#%%    
+
+torch.save(agent, f'/Reach_N_Sweep_Data/Reach_SAC_Actor_Nhidden{Nhidden}')
+
+
 # ==========================================
 # Post-Training Visualization Loop
 # ==========================================

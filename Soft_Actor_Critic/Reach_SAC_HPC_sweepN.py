@@ -137,4 +137,4 @@ for episode in range(Nepisodes):
         print('Eval Reward (Deterministic): ' + str(eval_reward))
 
 # Save the models after training
-torch.save(agent, f'../Reach_N_Sweep_Data/Reach_SAC_Actor_Nhidden{Nhidden}')
+torch.save(agent, f'/Reach_N_Sweep_Data/Reach_SAC_Actor_Nhidden{Nhidden}')
