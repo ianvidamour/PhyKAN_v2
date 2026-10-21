@@ -6,19 +6,17 @@ Created on Thu Jul 16 16:30:56 2026
 @author: ian
 """
 # Imports of necessary modules
+import os
 import numpy as np
 import torch
-import torch.nn as nn
-import torch.distributions as distributions
-import torch.nn.functional as F
 import sys
 from pathlib import Path
 parent_dir = Path(__file__).resolve().parent.parent
 sys.path.append(str(parent_dir))
-from PhyKAN_Util_v2 import PhyKAN_v2
-from PhyKAN_Util_v2_SAC import PhyKAN_v2_Actor, PhyKAN_v2_SAC, EfficientReplayBuffer
+from PhyKAN_Util_v2_SAC import PhyKAN_v2_SAC, EfficientReplayBuffer
 import gymnasium
 import gymnasium_robotics
+
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
@@ -38,6 +36,7 @@ high_pass_lookup = np.load('../HighFilterVals.npy')
 Nfilts = 6
 Nhidden = 50
 
+
 # Learning parameters
 gamma = 0.99
 critic_lr = 3e-4     
@@ -47,8 +46,9 @@ update_tau = 5e-3
 Nepisodes = 30000    
 batch_size = 256  
 
+shape = [Nstates, Nhidden, Nactions]
 # Instantiate SAC networks
-agent = PhyKAN_v2_SAC([Nstates, Nhidden, Nhidden, Nactions], Nfilts, low_pass_lookup, high_pass_lookup, gamma=gamma, critic_lr=critic_lr, actor_lr=actor_lr, update_tau=update_tau)
+agent = PhyKAN_v2_SAC(shape, Nfilts, low_pass_lookup, high_pass_lookup, gamma=gamma, critic_lr=critic_lr, actor_lr=actor_lr, update_tau=update_tau)
 agent.to(device)
 
 # Instantiate environments
@@ -135,33 +135,7 @@ for episode in tqdm.tqdm(range(Nepisodes)):
         print('Eval Reward (Deterministic): ' + str(eval_reward))
 
 
-torch.save(agent, f'/Reach_N_Sweep_Data/Reach_SAC_Actor_Nhidden{Nhidden}')
+        torch.save(agent, os.getcwd()+f'/HandReach_N_Sweep_Data/HandReach_SAC_Actor_Shape{shape}')
 
 
-# ==========================================
-# Post-Training Visualization Loop
-# ==========================================
-# Synchronized to v3 for runtime compatibility
-visual_env = gymnasium.make("HandReachDense-v3", render_mode="human")
-
-state, info = visual_env.reset()
-visual_obs = get_goal_conditioned_obs(state)
-total_eval_reward = 0
-
-for step in range(50):
-    visual_env.render()
-    
-    with torch.no_grad():
-        state_t = torch.FloatTensor(visual_obs).unsqueeze(0).to(device)
-        action_t, _ = agent.actor.sample(state_t, deterministic=True)
-        action = action_t.cpu().squeeze(0).numpy()
         
-    state, reward, terminated, truncated, info = visual_env.step(action)
-    visual_obs = get_goal_conditioned_obs(state)
-    total_eval_reward += reward
-    
-    if terminated or truncated:
-        break
-
-print(f"Visualized Run Completed. Score: {total_eval_reward}")
-visual_env.close()

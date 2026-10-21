@@ -1,13 +1,7 @@
 #!/bin/bash
-#SBATCH --partition=gpu
-#SBATCH --qos=gpu
-#SBATCH --nodes=1
-#SBATCH --gpus-per-node=1
 #SBATCH -t 3-08:00:00
 #SBATCH --mem=40G
-#SBATCH --array=0-5
-PATH="$HOME/.conda/envs/:$PATH"
-module load Anaconda3/2022.10
-module load cuDNN/8.7.0.84-CUDA-11.8.0
-source activate pytorch
-python Reach_SAC_HPC_sweepN.py $SLURM_ARRAY_TASK_ID
+#SBATCH --array=0-50
+source /data/Ian_Data/miniconda3/etc/profile.d/conda.sh
+conda activate rl_env
+python3 FetchReach_SAC_HPC_Sweep.py $SLURM_ARRAY_TASK_ID

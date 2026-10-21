@@ -11,7 +11,7 @@ import torch
 import torch.nn as nn
 
 class PhyKAN(nn.Module):
-    def __init__(self, KANshape, filters_per_unit, low_pass_lookup, high_pass_lookup, thresholding=False, lr_decay=0.99, sigmoid_s=0.5, lr=1e-3):
+    def __init__(self, KANshape, filters_per_unit, low_pass_lookup, high_pass_lookup, load_model=None, thresholding=False, lr_decay=0.99, sigmoid_s=0.5, lr=1e-3):
         super().__init__()
         # Find number of layers
         self.Nlayers = len(KANshape)-1
@@ -25,7 +25,8 @@ class PhyKAN(nn.Module):
             layer_params = torch.tile(low_params, (KANshape[i], KANshape[i+1], 1, 2))
             noise = (torch.rand(layer_params.shape)-0.5)*0.01
             layer_params = layer_params + noise
-            gains = torch.rand((KANshape[i], KANshape[i+1], filters_per_unit, 1))/filters_per_unit
+            factor = np.sqrt(6/(filters_per_unit*(KANshape[i] + KANshape[i+1])))
+            gains = (2*torch.rand((KANshape[i], KANshape[i+1], filters_per_unit, 1))-1)*factor
             params = torch.cat((gains, layer_params), dim=3)
             params.requires_grad=True
             self.filter_params.append(params)
@@ -37,6 +38,11 @@ class PhyKAN(nn.Module):
             else:
                 thresholds = torch.zeros(KANshape[i], requires_grad=True)
             self.thresholds.append(thresholds)
+        if load_model!=None:
+            
+            self.load_model = load_model
+            for l, parameters in enumerate(load_model.filter_params):
+                self.load_model.filter_params[l] = parameters.requires_grad_(False)
         # Initialise optimisers
         self.filter_optim = torch.optim.Adam(params=self.filter_params, lr=lr)
         self.threshold_optim = torch.optim.Adam(params=self.thresholds, lr=1e-5)
@@ -81,11 +87,8 @@ class PhyKAN(nn.Module):
         mindiff_low = torch.argmin(difference_low, dim=-1)
         mindiff_high = torch.argmin(difference_high, dim=-1)
         # Select discretised samples
-        for i in range(fc_low.shape[0]):
-            for j in range(fc_low.shape[1]):
-                for k in range(fc_low.shape[2]):
-                    discretised_fc_low[i,j,k] = self.low_pass_lookup[mindiff_low[i,j,k]]
-                    discretised_fc_high[i,j,k] = self.high_pass_lookup[mindiff_high[i,j,k]]
+        discretised_fc_low = self.low_pass_lookup[mindiff_low]
+        discretised_fc_high = self.high_pass_lookup[mindiff_high]
         # Passthrough discretisation to enable backprop (straight-through estimator)
         passed_fc_low = fc_low + discretised_fc_low.detach() - fc_low.detach()
         passed_fc_high = fc_high + discretised_fc_high.detach() - fc_high.detach()
@@ -160,7 +163,84 @@ class PhyKAN(nn.Module):
         Hout = gain*torch.abs((2j*torch.pi*freq*RC_high/(1+2j*torch.pi*freq*RC_high))*(1/(1+2j*torch.pi*freq*RC_low)))
         return Hout.sum(dim=1).sum(dim=-1)
     
-    def forward(self, Xin, discrete=False):
+
+    def return_matrix(self, thetak, ak, dk, alphak, batch_size):
+        cos = lambda x: torch.cos(x)
+        sin = lambda x: torch.sin(x)
+        T = torch.zeros((batch_size, 4, 4))
+        # define denavit hartenberg transformations
+        T[:, 0, 0] = cos(thetak)
+        T[:, 0, 1] = -cos(alphak)*sin(thetak)
+        T[:, 0, 2] = sin(alphak)*sin(thetak)
+        T[:, 0, 3] = ak*cos(thetak)
+        T[:, 1, 0] = sin(thetak)
+        T[:, 1, 1] = cos(alphak)*cos(thetak)
+        T[:, 1, 2] = -sin(alphak)*cos(thetak)
+        T[:, 1, 3] = ak*sin(thetak)
+        T[:, 2, 1] = sin(alphak)
+        T[:, 2, 2] = cos(alphak)
+        T[:, 2, 3] = dk
+        T[:, 3, 3] = 1
+        return T
+    
+    def fw_kin(self, angles):
+        batch_size = angles.shape[0]
+        # define lengths
+        l1 = 0.290
+        l2 = 0.270
+        l3 = 0.070
+        l4 = 0.134
+        l5 = 0.168
+        l6 = 0.072
+        # take each angle
+        q1 = angles[:, 0]
+        q2 = angles[:, 1]
+        q3 = angles[:, 2]
+        q4 = angles[:, 3]
+        q5 = angles[:, 4]
+        q6 = angles[:, 5]
+        # scale to ranges
+        q1 = 5.76*(q1-0.5)
+        q2 = 3.84*(q2-0.5)
+        q3 = 1.22+(q3*0.7)
+        q4 = 5.58*(q4-0.5)
+        q5 = 4.18*(q5-0.5)
+        q6 = 6.28*q6
+        # generate denavit hartenberg transformations
+        T10 = self.return_matrix(q1, torch.zeros(batch_size), torch.ones(batch_size)*l1, -torch.pi/2 * torch.ones(batch_size), batch_size)
+        T21 = self.return_matrix(q2, torch.ones(batch_size)*l2, torch.zeros(batch_size), torch.zeros(batch_size), batch_size)
+        T32 = self.return_matrix(q3, torch.ones(batch_size)*l3, torch.ones(batch_size)*l4, -torch.pi/2*torch.ones(batch_size), batch_size)
+        T43 = self.return_matrix(q4, torch.zeros(batch_size), torch.ones(batch_size)*l5, torch.ones(batch_size)*torch.pi/2, batch_size)
+        T54 = self.return_matrix(q5, torch.ones(batch_size)*l6, torch.zeros(batch_size), torch.ones(batch_size)*-torch.pi/2, batch_size)
+        T65 = self.return_matrix(q6, torch.zeros(batch_size), torch.zeros(batch_size), torch.zeros(batch_size), batch_size)
+        # Work through links
+        T20 = torch.bmm(T10, T21)
+        T30 = torch.bmm(T20, T32)
+        T40 = torch.bmm(T30, T43)
+        T50 = torch.bmm(T40, T54)
+        T60 = torch.bmm(T50, T65)
+        locs = T60[:, :-1, -1]
+        return locs
+    
+    def band_pass_returnfilts(self, Xin, params):
+        # Bound parameters
+        params= self.sig(params)
+        prefreq = 10**(3.65+1.5*Xin).unsqueeze(-1).unsqueeze(-1)
+        freq = (4e6/np.pi)*torch.arctan((np.pi*prefreq)/4e6)
+        # Allow bounded gains to be both positive and negative
+        gain = 3*(params[:, 0].unsqueeze(0)-0.5)
+        # Set cutoff frequencies from parameters
+        fc_low = 10**(3.65+1.9*params[:, 1].unsqueeze(0))
+        fc_high = 10**(3.65+1.9*params[:, 2].unsqueeze(0))
+        # Convert cutoff frequency to product of resistance and capacitance
+        RC_low = (2*torch.pi*fc_low)**-1
+        RC_high = (2*torch.pi*fc_high)**-1
+        # Calculate steady state response with respect to drive frequency
+        Hout = gain*torch.abs((2j*torch.pi*freq*RC_high/(1+2j*torch.pi*freq*RC_high))*(1/(1+2j*torch.pi*freq*RC_low)))
+        # Sum across units within each edge
+        return Hout.squeeze().T
+    
+    def forward(self, Xin, discrete=False, input_sigmoid=True):
         batch_size = len(Xin)
         # Initialise inputs to and outputs from each layer
         inputs = []
@@ -169,9 +249,15 @@ class PhyKAN(nn.Module):
             inputs.append(torch.zeros((batch_size, self.KANshape[i])))
             outputs.append(torch.zeros((batch_size, self.KANshape[i+1])))
         if self.thresholding==True:
-            inputs[0][:, :] = self.sig((Xin-self.thresholds[0]))
+            if input_sigmoid==True:
+                inputs[0][:, :] = self.sig((Xin-self.thresholds[0]))
+            else:
+                inputs[0][:, :] = (Xin-self.thresholds[0])
         else:
-            inputs[0][:,:] = self.sig((Xin))
+            if input_sigmoid==True:
+                inputs[0][:,:] = self.sig((Xin))
+            else:
+                inputs[0][:,:] = Xin
         if discrete==True:
             # Pass through model
             for layer in range(self.Nlayers):
@@ -192,12 +278,12 @@ class PhyKAN(nn.Module):
                         inputs[layer+1][:, :] = self.sig(outputs[layer][:, :])
         return outputs
     
-    def train(self, Xin, Yin, penalty=True, stability_penalty=True, lamda=1e-4, stablam=1e-5, discrete=False):
+    def train(self, Xin, Yin, penalty=True, stability_penalty=True, lamda=1e-4, stablam=1e-5, discrete=False, input_sigmoid=True):
         # Reset optimisers
         self.filter_optim.zero_grad()
         self.threshold_optim.zero_grad()
         # Pass through Model
-        activations = self.forward(Xin, discrete=discrete)
+        activations = self.forward(Xin, discrete=discrete, input_sigmoid=input_sigmoid)
         pred = activations[-1]
         # Calculate loss
         loss_np = self.lossfn(pred, Yin)
@@ -220,6 +306,43 @@ class PhyKAN(nn.Module):
             loss.backward()
         else:
             # Single backward pass
+            loss.backward()
+        # Update parameters
+        self.filter_optim.step()
+        self.threshold_optim.step()
+        
+        return loss.item(), loss_np.item(), stability_loss.item()
+    
+    def train_ik(self, Xin, Yin, penalty=True, stability_penalty=True, lamda=1e-4, stablam=1e-5, discrete=False):
+        # Reset optimisers
+        self.filter_optim.zero_grad()
+        self.threshold_optim.zero_grad()
+        # Pass through Model
+        activations = self.forward(Xin, discrete=discrete)
+        pred = activations[-1]
+        true_loc = self.fw_kin(pred)
+        # Calculate loss
+        loss_np = self.lossfn(true_loc, Xin)
+        # Add penalty terms
+        if penalty==True:
+            penalty_loss = lamda * self.penalty(activations)
+            loss = loss_np + penalty_loss
+        else:
+            loss = loss_np
+        # Backward pass
+        stability_loss = torch.tensor([0.0])
+        if stability_penalty==True:
+            loss.backward(retain_graph=True)
+            stability_loss = 0
+            if stability_penalty == True:
+                for layer in self.filter_params:
+                    params = torch.zeros_like(layer)
+                    params[:,:,:,0] = 3*(layer[:,:,:,0]-0.5)
+                    params[:,:,:,1:] = 10**(3.65+1.9*layer[:,:,:,1:])
+                    gradients = layer.grad.abs().sum()
+                    stability_loss = stability_loss+gradients*stablam
+                loss = loss + stability_loss
+        else:
             loss.backward()
         # Update parameters
         self.filter_optim.step()

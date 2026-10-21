@@ -97,27 +97,28 @@ for episode in range(Nepisodes):
     eval_state, eval_info = env.reset()
     eval_state = state_normalisation(eval_state)
     eval_reward = 0
-    for eval_step in range(200):
-        with torch.no_grad():
-            eval_state_t = torch.FloatTensor(eval_state).unsqueeze(0).to(device)
-            # Utilise the deterministic=True flag for stable evaluation
-            eval_action_t, _ = agent.actor.sample(eval_state_t, deterministic=True)
-            eval_action = eval_action_t.cpu().squeeze(0).numpy()
+    if episode%10==0:
+        for eval_step in range(200):
+            with torch.no_grad():
+                eval_state_t = torch.FloatTensor(eval_state).unsqueeze(0).to(device)
+                # Utilise the deterministic=True flag for stable evaluation
+                eval_action_t, _ = agent.actor.sample(eval_state_t, deterministic=True)
+                eval_action = eval_action_t.cpu().squeeze(0).numpy()
+                
+            # Step the environment, scaling the action exactly like the training run
+            eval_next_state, eval_reward_step, eval_done, eval_truncated, eval_info = env.step(eval_action * 2)
+            eval_next_state = state_normalisation(eval_next_state)
+            eval_reward += eval_reward_step
             
-        # Step the environment, scaling the action exactly like the training run
-        eval_next_state, eval_reward_step, eval_done, eval_truncated, eval_info = env.step(eval_action * 2)
-        eval_next_state = state_normalisation(eval_next_state)
-        eval_reward += eval_reward_step
+            if eval_done or eval_truncated:
+                break
+            eval_state = eval_next_state
+        # ==========================================
         
-        if eval_done or eval_truncated:
-            break
-        eval_state = eval_next_state
-    # ==========================================
-    
-    print(' ')
-    print('Episode: ' + str(episode))
-    print('Train Reward: ' + str(episode_reward))
-    print('Eval Reward (Deterministic): ' + str(eval_reward))
+        print(' ')
+        print('Episode: ' + str(episode))
+        print('Train Reward: ' + str(episode_reward))
+        print('Eval Reward (Deterministic): ' + str(eval_reward))
 
 #%%    
     

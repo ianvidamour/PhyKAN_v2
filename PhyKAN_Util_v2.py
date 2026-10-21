@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Created on Mon Jul 21 15:02:08 2025
+Created on Mon Jul 21 15:02:08 2026
 
 @author: ian
 """
@@ -128,7 +128,7 @@ class PhyKAN_v2(nn.Module):
         return activations, node_inputs
 
     def forward(self, Xin, discrete=False, return_edges=False):
-        # Initialize empty lists to store layer outputs dynamically
+        # Initialise empty lists to store layer outputs dynamically
         edge_activations = []
         node_activations = []
         # The input to the first layer is the sigmoid of Xin
@@ -162,7 +162,14 @@ class PhyKAN_v2(nn.Module):
         else:
             return node_activations, edge_activations
     
-    def train(self, Xin, Yin, penalty=True, stability_penalty=True, lamda=1e-4, stablam=1e-5, discrete=False):
+    def train(self, Xin=None, Yin=None, penalty=True, stability_penalty=True, lamda=1e-4, stablam=1e-5, discrete=False):
+        # nn.Module.train() uses this method name, so we must preserve PyTorch's
+        # training-mode switching semantics when called from .eval() / .train().
+        if isinstance(Xin, bool) or isinstance(Yin, bool):
+            return super().train(Xin if isinstance(Xin, bool) else Yin)
+        if Xin is None and Yin is None:
+            return super().train(True)
+
         # Reset optimisers
         self.filter_optim.zero_grad()
         # Pass through Model
@@ -173,7 +180,7 @@ class PhyKAN_v2(nn.Module):
         
         # Add penalty terms
         if penalty:
-            penalty_loss = lamda * self.penalty(edge_activations)
+            penalty_loss = lamda * self.penalty(edge_activations, eps=lamda)
             loss = loss_np + penalty_loss
         else:
             loss = loss_np
@@ -199,24 +206,23 @@ class PhyKAN_v2(nn.Module):
         return loss_np.item(), penalty_loss.item(), stability_loss.item()
 
     # Refactored for improved speed
-    def penalty(self, activations):
+    def penalty(self, activations, eps=1e-8):
         n = len(activations[0])
-        penalty = 0.0
-        eps = 1e-8
+        penalty = torch.tensor([0.0], device=activations[0].device)
 
         for layer in range(self.Nlayers - 1):
             layer_acts = activations[layer]
             abs_acts = layer_acts.abs()
 
-            # L1 sparsity term with a tiny stabilizing offset.
+            # L1 sparsity term with a tiny stabilising offset.
             l1_layer = (1.0 / n) * abs_acts.sum() + eps
 
-            # Normalize activations safely across the incoming edges.
+            # Normalise activations safely across the incoming edges.
             denom = abs_acts.sum(dim=(1, 2), keepdim=True)
             denom = torch.clamp(denom, min=eps)
             probs = abs_acts / denom
 
-            # Compute a positive distribution over incoming edges for entropy regularization.
+            # Compute a positive distribution over incoming edges for entropy regularisation.
             q_ih = (1.0 / n) * probs.sum(dim=0)
             entropy_layer = -(q_ih * torch.log(torch.clamp(q_ih, min=eps))).sum()
 
