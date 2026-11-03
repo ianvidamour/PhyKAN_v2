@@ -86,11 +86,12 @@ class PhyKAN_v2(nn.Module):
         passed_fc_high = fc_high + discretised_fc_high.detach() - fc_high.detach()
         
         # Fix: Use passed_fc_* variables so that backward gradients can bypass detach()
-        x = freq / passed_fc_low
-        y = freq / passed_fc_high
+        x = freq / passed_fc_high
+        y = freq / passed_fc_low
         
         # Use torch.hypot to safely compute sqrt(1 + x^2) without precision collapse
         ones = torch.ones_like(x)
+        
         mag_high = x / torch.hypot(ones, x)
         mag_low = 1.0 / torch.hypot(ones, y)
         
@@ -113,8 +114,8 @@ class PhyKAN_v2(nn.Module):
         fc_low = 10**(self.filter_alpha + self.filter_beta * bounded_params[:, :, :, 1])
         fc_high = 10**(self.filter_alpha + self.filter_beta * bounded_params[:, :, :, 2])
         # Refactored forward pass to avoid complex numbers
-        x = freq / fc_low
-        y = freq / fc_high
+        x = freq / fc_high
+        y = freq / fc_low
         # Use torch.hypot to safely compute sqrt(1 + x^2) without precision collapse
         ones = torch.ones_like(x)
         mag_high = x / torch.hypot(ones, x)
